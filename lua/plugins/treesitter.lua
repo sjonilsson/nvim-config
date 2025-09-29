@@ -1,42 +1,120 @@
--- IMPORTANT: tree-sitter CLI is needed
--- https://github.com/tree-sitter/tree-sitter
+return {
+    "nvim-treesitter/nvim-treesitter",
+    branch = "main",
+    version = false, -- last release is way too old and doesn't work on Windows
+    build = function()
+        local TS = require("nvim-treesitter")
+        if not TS.get_installed then
+            LazyVim.error("Please restart Neovim and run `:TSUpdate` to use the `nvim-treesitter` **main** branch.")
+            return
+        end
+        LazyVim.treesitter.ensure_treesitter_cli(function()
+            TS.update(nil, { summary = true })
+        end)
+    end,
+    lazy = vim.fn.argc(-1) == 0, -- load treesitter early when opening a file from the cmdline
+    event = { "LazyFile", "VeryLazy" },
+    cmd = { "TSUpdate", "TSInstall", "TSLog", "TSUninstall" },
+    opts_extend = { "ensure_installed" },
+    ---@class lazyvim.TSConfig: TSConfig
+    opts = {
+        -- LazyVim config for treesitter
+        indent = { enable = true },
+        highlight = { enable = true },
+        folds = { enable = true },
+        ensure_installed = {
+            "bash",
+            "c",
+            "diff",
+            "html",
+            "javascript",
+            "jsdoc",
+            "json",
+            "jsonc",
+            "lua",
+            "luadoc",
+            "luap",
+            "markdown",
+            "markdown_inline",
+            "printf",
+            "python",
+            "query",
+            "regex",
+            "toml",
+            "tsx",
+            "typescript",
+            "vim",
+            "vimdoc",
+            "xml",
+            "yaml",
+        },
+    },
+    ---@param opts lazyvim.TSConfig
+    config = function(_, opts)
+        local TS = require("nvim-treesitter")
 
-local Plugin = { "nvim-treesitter/nvim-treesitter" }
-local user = {}
+        setmetatable(require("nvim-treesitter.install"), {
+            __newindex = function(_, k)
+                if k == "compilers" then
+                    vim.schedule(function()
+                        LazyVim.error({
+                            "Setting custom compilers for `nvim-treesitter` is no longer supported.",
+                            "",
+                            "For more info, see:",
+                            "- [compilers](https://docs.rs/cc/latest/cc/#compile-time-requirements)",
+                        })
+                    end)
+                end
+            end,
+        })
 
-Plugin.branch = "main"
-Plugin.build = ":TSUpdate"
-Plugin.lazy = false
+        -- some quick sanity checks
+        if not TS.get_installed then
+            return LazyVim.error("Please use `:Lazy` and update `nvim-treesitter`")
+        elseif type(opts.ensure_installed) ~= "table" then
+            return LazyVim.error("`nvim-treesitter` opts.ensure_installed must be a table")
+        end
 
-function Plugin.config()
-    -- NOTE: the list of supported parsers is the documentation:
-    -- https://github.com/nvim-treesitter/nvim-treesitter/blob/main/SUPPORTED_LANGUAGES.md
-    local parsers = { "lua", "vim", "vimdoc" }
+        -- setup treesitter
+        TS.setup(opts)
+        LazyVim.treesitter.get_installed(true) -- initialize the installed langs
 
-    local filetypes = user.map_filetypes(parsers)
-    local group = vim.api.nvim_create_augroup("treesitter_cmds", { clear = true })
+        -- install missing parsers
+        local install = vim.tbl_filter(function(lang)
+            return not LazyVim.treesitter.have(lang)
+        end, opts.ensure_installed or {})
+        if #install > 0 then
+            LazyVim.treesitter.ensure_treesitter_cli(function()
+                TS.install(install, { summary = true }):await(function()
+                    LazyVim.treesitter.get_installed(true) -- refresh the installed langs
+                end)
+            end)
+        end
 
-    require("nvim-treesitter").install(parsers)
+        vim.api.nvim_create_autocmd("FileType", {
+            group = vim.api.nvim_create_augroup("lazyvim_treesitter", { clear = true }),
+            callback = function(ev)
+                if not LazyVim.treesitter.have(ev.match) then
+                    return
+                end
 
-    vim.api.nvim_create_autocmd("FileType", {
-        pattern = filetypes,
-        group = group,
-        desc = "enable treesitter syntax highlight",
-        callback = function()
-            vim.treesitter.start()
-        end,
-    })
-end
+                -- highlighting
+                if vim.tbl_get(opts, "highlight", "enable") ~= false then
+                    pcall(vim.treesitter.start)
+                end
 
-function user.map_filetypes(parsers)
-    local result = {}
-    local get_filetypes = vim.treesitter.language.get_filetypes
+                -- indents
+                if vim.tbl_get(opts, "indent", "enable") ~= false and LazyVim.treesitter.have(ev.match, "indents") then
+                    LazyVim.set_default("indentexpr", "v:lua.LazyVim.treesitter.indentexpr()")
+                end
 
-    for _, parser in ipairs(parsers) do
-        vim.list_extend(result, get_filetypes(parser))
-    end
-
-    return result
-end
-
-return Plugin
+                -- folds
+                if vim.tbl_get(opts, "folds", "enable") ~= false and LazyVim.treesitter.have(ev.match, "folds") then
+                    if LazyVim.set_default("foldmethod", "expr") then
+                        LazyVim.set_default("foldexpr", "v:lua.LazyVim.treesitter.foldexpr()")
+                    end
+                end
+            end,
+        })
+    end,
+}
